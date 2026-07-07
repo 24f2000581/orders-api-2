@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import time
@@ -7,9 +7,9 @@ import base64
 
 app = FastAPI()
 
-# -----------------------------
-# Enable CORS
-# -----------------------------
+# --------------------------------------------------
+# CORS
+# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,59 +18,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# Assignment values
-# -----------------------------
+# --------------------------------------------------
+# Assignment Values
+# --------------------------------------------------
 TOTAL_ORDERS = 53
 RATE_LIMIT = 19
-WINDOW = 10
+WINDOW = 10  # seconds
 
-# -----------------------------
-# In-memory storage
-# -----------------------------
+# --------------------------------------------------
+# In-memory Storage
+# --------------------------------------------------
 idempotency_store = {}
-
 client_requests = {}
 
-
-# -----------------------------
+# --------------------------------------------------
 # Rate Limiting Middleware
-# -----------------------------
+# --------------------------------------------------
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
-    if request.url.path == "/orders":
+    # Skip CORS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
 
+    if request.url.path == "/orders":
         client = request.headers.get("X-Client-Id", "anonymous")
 
         now = time.time()
 
         history = client_requests.get(client, [])
 
+        # Remove expired requests
         history = [t for t in history if now - t < WINDOW]
 
         if len(history) >= RATE_LIMIT:
-
-            retry = WINDOW - int(now - history[0])
+            retry = max(1, int(WINDOW - (now - history[0])))
 
             return JSONResponse(
                 status_code=429,
                 content={"detail": "Rate limit exceeded"},
-                headers={"Retry-After": str(max(retry,1))}
+                headers={"Retry-After": str(retry)}
             )
 
         history.append(now)
-
         client_requests[client] = history
 
     response = await call_next(request)
-
     return response
 
+# --------------------------------------------------
+# CORS Preflight
+# --------------------------------------------------
+@app.options("/orders")
+def options_orders():
+    return Response(status_code=200)
 
-# -----------------------------
-# Helper functions
-# -----------------------------
+# --------------------------------------------------
+# Cursor Helpers
+# --------------------------------------------------
 def encode_cursor(position: int):
     return base64.b64encode(str(position).encode()).decode()
 
@@ -78,15 +83,16 @@ def encode_cursor(position: int):
 def decode_cursor(cursor: str):
     try:
         return int(base64.b64decode(cursor).decode())
-    except:
+    except Exception:
         return 0
 
-
-# -----------------------------
+# --------------------------------------------------
 # POST /orders
-# -----------------------------
+# --------------------------------------------------
 @app.post("/orders", status_code=201)
-def create_order(idempotency_key: str = Header(..., alias="Idempotency-Key")):
+def create_order(
+    idempotency_key: str = Header(..., alias="Idempotency-Key")
+):
 
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
@@ -100,12 +106,14 @@ def create_order(idempotency_key: str = Header(..., alias="Idempotency-Key")):
 
     return order
 
-
-# -----------------------------
+# --------------------------------------------------
 # GET /orders
-# -----------------------------
+# --------------------------------------------------
 @app.get("/orders")
-def list_orders(limit: int = 10, cursor: str = None):
+def get_orders(limit: int = 10, cursor: str | None = None):
+
+    if limit < 1:
+        limit = 1
 
     start = 0
 
@@ -132,7 +140,20 @@ def list_orders(limit: int = 10, cursor: str = None):
         "next_cursor": next_cursor
     }
 
-
+# --------------------------------------------------
+# Root
+# --------------------------------------------------
 @app.get("/")
 def root():
-    return {"message": "Orders API running"}
+    return {
+        "message": "Orders API running"
+    }
+
+# --------------------------------------------------
+# Health Check (optional)
+# --------------------------------------------------
+@app.get("/health")
+def health():
+    return {
+        "status": "ok"
+    }
