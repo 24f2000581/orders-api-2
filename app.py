@@ -1,15 +1,16 @@
-from fastapi import FastAPI, Header, Request, Response
+from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import time
 import uuid
 import base64
+import math
 
 app = FastAPI()
 
-# =====================================================
+# ==========================================================
 # CORS
-# =====================================================
+# ==========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,35 +18,34 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],
 )
 
-# =====================================================
+# ==========================================================
 # Assignment Values
-# =====================================================
+# ==========================================================
 
 TOTAL_ORDERS = 53
 RATE_LIMIT = 19
-WINDOW = 10  # seconds
+WINDOW = 10
 
-# =====================================================
+# ==========================================================
 # In-memory Storage
-# =====================================================
+# ==========================================================
 
 idempotency_store = {}
 client_requests = {}
 
-# =====================================================
+# ==========================================================
 # Rate Limiting Middleware
-# =====================================================
+# ==========================================================
 
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
-    # Allow CORS preflight
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    # Only rate-limit /orders
     if request.url.path == "/orders":
 
         client = request.headers.get("X-Client-Id")
@@ -56,42 +56,38 @@ async def rate_limit(request: Request, call_next):
 
             history = client_requests.get(client, [])
 
-            # Remove expired timestamps
-            history = [t for t in history if now - t < WINDOW]
+            history = [
+                t for t in history
+                if now - t < WINDOW
+            ]
 
             if len(history) >= RATE_LIMIT:
 
                 retry_after = max(
                     1,
-                    int(WINDOW - (now - history[0]))
+                    math.ceil(WINDOW - (now - history[0]))
                 )
 
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=429,
                     content={
                         "detail": "Rate limit exceeded"
-                    },
-                    headers={
-                        "Retry-After": str(retry_after)
                     }
                 )
 
+                response.headers["Retry-After"] = str(retry_after)
+
+                return response
+
             history.append(now)
+
             client_requests[client] = history
 
     return await call_next(request)
 
-# =====================================================
-# OPTIONS Endpoint
-# =====================================================
-
-@app.options("/orders")
-async def options_orders():
-    return Response(status_code=200)
-
-# =====================================================
+# ==========================================================
 # Cursor Helpers
-# =====================================================
+# ==========================================================
 
 def encode_cursor(position: int) -> str:
     return base64.b64encode(
@@ -107,28 +103,15 @@ def decode_cursor(cursor: str) -> int:
     except Exception:
         return 0
 
-# =====================================================
+# ==========================================================
 # POST /orders
-# =====================================================
+# ==========================================================
 
 @app.post("/orders")
 async def create_order(
-    request: Request,
-    idempotency_key: str | None = Header(
-        default=None,
-        alias="Idempotency-Key"
-    )
+    idempotency_key: str = Header(..., alias="Idempotency-Key")
 ):
 
-    if idempotency_key is None:
-        idempotency_key = request.headers.get(
-            "Idempotency-Key"
-        )
-
-    if not idempotency_key:
-        idempotency_key = str(uuid.uuid4())
-
-    # Existing order
     if idempotency_key in idempotency_store:
 
         return JSONResponse(
@@ -136,7 +119,6 @@ async def create_order(
             content=idempotency_store[idempotency_key]
         )
 
-    # Create new order
     order = {
         "id": str(uuid.uuid4()),
         "status": "created"
@@ -149,9 +131,9 @@ async def create_order(
         content=order
     )
 
-# =====================================================
+# ==========================================================
 # GET /orders
-# =====================================================
+# ==========================================================
 
 @app.get("/orders")
 async def get_orders(
@@ -162,19 +144,16 @@ async def get_orders(
     if limit < 1:
         limit = 1
 
-    start = 0
-
-    if cursor:
-        start = decode_cursor(cursor)
+    start = decode_cursor(cursor) if cursor else 0
 
     end = min(start + limit, TOTAL_ORDERS)
 
     items = []
 
-    for order_id in range(start + 1, end + 1):
+    for i in range(start + 1, end + 1):
         items.append(
             {
-                "id": order_id,
+                "id": i,
                 "status": "ready"
             }
         )
@@ -189,19 +168,20 @@ async def get_orders(
         "next_cursor": next_cursor
     }
 
-# =====================================================
-# Root (supports GET and HEAD)
-# =====================================================
+# ==========================================================
+# Root
+# ==========================================================
 
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.get("/")
+@app.head("/")
 async def root():
     return {
         "message": "Orders API running"
     }
 
-# =====================================================
-# Health Check
-# =====================================================
+# ==========================================================
+# Health
+# ==========================================================
 
 @app.get("/health")
 async def health():
