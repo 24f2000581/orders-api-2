@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import time
@@ -43,6 +43,7 @@ client_requests = {}
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
+    # Allow all OPTIONS requests
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -56,6 +57,7 @@ async def rate_limit(request: Request, call_next):
 
             history = client_requests.get(client, [])
 
+            # Keep only requests in the last WINDOW seconds
             history = [
                 t for t in history
                 if now - t < WINDOW
@@ -80,10 +82,18 @@ async def rate_limit(request: Request, call_next):
                 return response
 
             history.append(now)
-
             client_requests[client] = history
 
-    return await call_next(request)
+    response = await call_next(request)
+    return response
+
+# ==========================================================
+# Catch-all OPTIONS Handler
+# ==========================================================
+
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    return Response(status_code=200)
 
 # ==========================================================
 # Cursor Helpers
@@ -109,9 +119,17 @@ def decode_cursor(cursor: str) -> int:
 
 @app.post("/orders")
 async def create_order(
-    idempotency_key: str = Header(..., alias="Idempotency-Key")
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key"
+    )
 ):
 
+    # Generate a key if none supplied
+    if not idempotency_key:
+        idempotency_key = str(uuid.uuid4())
+
+    # Return existing order
     if idempotency_key in idempotency_store:
 
         return JSONResponse(
@@ -119,6 +137,7 @@ async def create_order(
             content=idempotency_store[idempotency_key]
         )
 
+    # Create new order
     order = {
         "id": str(uuid.uuid4()),
         "status": "created"
